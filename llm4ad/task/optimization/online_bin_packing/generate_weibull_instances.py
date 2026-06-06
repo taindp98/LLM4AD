@@ -16,7 +16,8 @@ def generate_weibull_dataset(num_instances, num_items, capacity_limit):
         items = []
 
         # Generate random samples from Weibull(45, 3) distribution
-        samples = np.random.weibull(3, num_items) * 45
+        # samples = np.random.weibull(3, num_items) * 45
+        samples = np.random.weibull(3, num_items) * 45 * (capacity_limit / 100)
 
         # Clip the samples at the specified limit
         samples = np.clip(samples, 1, capacity_limit)
