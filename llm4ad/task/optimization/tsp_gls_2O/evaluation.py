@@ -9,7 +9,7 @@ import numpy as np
 from llm4ad.base import Evaluation
 from llm4ad.task.optimization.tsp_gls_2O.get_instance import GetData, TSPInstance
 from llm4ad.task.optimization.tsp_gls_2O.template import template_program, task_description
-from .gls import guided_local_search_with_time
+from .gls import guided_local_search_with_time, guided_local_search
 
 __all__ = ['TSP_GLS_2O_Evaluation']
 
@@ -31,7 +31,17 @@ def solve_with_time(inst: TSPInstance, eva) -> Tuple[float, float]:
     # print(result)
     return cost, running_time
 
-def evaluate(instance_data,n_ins,prob_size, eva: callable) -> np.ndarray:
+def solve_without_time(inst: TSPInstance, eva) -> Tuple[float, float]:
+    try:
+        result = guided_local_search(inst.distmat, inst.distmat.copy(), eva, perturbation_moves, iter_limit)
+        cost = calculate_cost(inst, result)
+    except Exception as e:
+        # cost, running_time = 1E10, 1E10
+        cost = float("inf")
+    # print(result)
+    return cost
+
+def evaluate_with_time(instance_data,n_ins,prob_size, eva: callable) -> np.ndarray:
     objs = np.zeros((n_ins, 2))
 
     for i in range(n_ins):
@@ -40,6 +50,16 @@ def evaluate(instance_data,n_ins,prob_size, eva: callable) -> np.ndarray:
         objs[i] = np.array(obj)
 
     obj = np.mean(objs, axis=0)
+    return -obj
+
+def evaluate_without_time(instance_data,n_ins,prob_size, eva: callable) -> np.ndarray:
+    objs = np.zeros(n_ins)
+
+    for i in range(n_ins):
+        obj = solve_without_time(instance_data[i], eva)
+        objs[i] = obj
+
+    obj = np.mean(objs)
     return -obj
 
 
@@ -69,8 +89,36 @@ class TSP_GLS_2O_Evaluation(Evaluation):
         self._datasets = getData.generate_instances()
 
     def evaluate_program(self, program_str: str, callable_func: callable) -> Any | None:
-        return evaluate(self._datasets,self.n_instance,self.problem_size, callable_func)
-    
+        return evaluate_with_time(self._datasets,self.n_instance,self.problem_size, callable_func)
+
+class TSP_GLS_2O_Evaluation_wo_Time(Evaluation):
+    """Evaluator for traveling salesman problem."""
+
+    def __init__(self, **kwargs):
+
+        """
+            Args:
+                None
+            Raises:
+                AttributeError: If the data key does not exist.
+                FileNotFoundError: If the specified data file is not found.
+        """
+
+        super().__init__(
+            template_program=template_program,
+            task_description=task_description,
+            use_numba_accelerate=False,
+            timeout_seconds=70  # Changed from 20 to allow 60s internal limit + buffer
+        )
+
+        self.n_instance = 16
+        self.problem_size = 100
+        getData = GetData(self.n_instance, self.problem_size)
+        self._datasets = getData.generate_instances()
+
+    def evaluate_program(self, program_str: str, callable_func: callable) -> Any | None:
+        return evaluate_without_time(self._datasets,self.n_instance,self.problem_size, callable_func)
+
 
 if __name__ == '__main__':
     import numpy as np

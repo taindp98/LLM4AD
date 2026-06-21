@@ -147,6 +147,12 @@ def _guided_local_search(
         if cur_cost < best_cost:
             best_tour, best_cost = cur_tour.copy(), cur_cost
         if time.monotonic() - start_time > 60:
+            """
+            Note:
+            If update_edge_distance (the generated heuristic) infinite-loops or takes a very long time,
+            the 60s check is never reached — it's blocked waiting for _perturbation to return.
+            That's why the outer timeout_seconds subprocess kill is the only safety net for a badly-behaved heuristic.
+            """
             break
     return best_tour
 
