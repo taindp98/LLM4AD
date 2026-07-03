@@ -1,10 +1,11 @@
 import time
+import random
 
 import numpy as np
 import numpy.typing as npt
 import numba as nb
 import concurrent.futures
-from typing import Tuple
+from typing import Tuple, Optional
 
 FloatArray = npt.NDArray[np.float64]
 IntArray = npt.NDArray[np.int_]
@@ -130,8 +131,17 @@ def _init_nearest_neighbor(distmat, start):
 
 
 def _guided_local_search(
-    distmat, guide, start, update_edge_distance, perturbation_moves = 30, iter_limit = 1000
+    distmat, guide, start, update_edge_distance, perturbation_moves = 30, iter_limit = 1000,
+    seed: Optional[int] = None,
 ) -> npt.NDArray[np.uint16]:
+    # The GLS framework itself is deterministic (numba kernels use no RNG), but
+    # the LLM-generated `update_edge_distance` runs as plain Python and may call
+    # `np.random` / `random`. Seeding here makes such a heuristic reproducible
+    # for a given (instance, seed) task — mirroring irace, where each task seeds
+    # the target algorithm. `seed=None` keeps the legacy (unseeded) behavior.
+    if seed is not None:
+        np.random.seed(seed)
+        random.seed(seed)
     penalty = np.zeros_like(distmat)
     start_time = time.monotonic()
     best_tour = _init_nearest_neighbor(distmat, start)
@@ -178,11 +188,12 @@ def _guided_local_search_with_time(
     return best_tour, running_time
 
 def guided_local_search(
-    distmat: FloatArray, 
+    distmat: FloatArray,
     guide: FloatArray,
     update_edge_distance,
-    perturbation_moves: int = 30, 
-    iter_limit: int = 1000
+    perturbation_moves: int = 30,
+    iter_limit: int = 1000,
+    seed: Optional[int] = None,
 ) -> npt.NDArray[np.uint16]:
     return _guided_local_search(
         distmat.astype(np.float32),
@@ -191,6 +202,7 @@ def guided_local_search(
         update_edge_distance,
         perturbation_moves=perturbation_moves,
         iter_limit=iter_limit,
+        seed=seed,
     )
 
 def guided_local_search_with_time(

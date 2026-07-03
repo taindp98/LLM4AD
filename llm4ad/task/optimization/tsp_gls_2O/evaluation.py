@@ -31,9 +31,9 @@ def solve_with_time(inst: TSPInstance, eva) -> Tuple[float, float]:
     # print(result)
     return cost, running_time
 
-def solve_without_time(inst: TSPInstance, eva) -> Tuple[float, float]:
+def solve_without_time(inst: TSPInstance, eva, seed=None) -> Tuple[float, float]:
     try:
-        result = guided_local_search(inst.distmat, inst.distmat.copy(), eva, perturbation_moves, iter_limit)
+        result = guided_local_search(inst.distmat, inst.distmat.copy(), eva, perturbation_moves, iter_limit, seed=seed)
         cost = calculate_cost(inst, result)
     except Exception as e:
         # cost, running_time = 1E10, 1E10
