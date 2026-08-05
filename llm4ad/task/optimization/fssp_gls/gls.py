@@ -77,13 +77,13 @@ def _sum_and_order(tasks, n, m):
             tab[j] += tasks[j, k]
     order = np.empty(n, dtype=np.int64)
     for it in range(n):
-        max_time = 1.0
+        max_time = -1.0
         place = 0
         for i in range(n):
             if max_time < tab[i]:
                 max_time = tab[i]
                 place = i
-        tab[place] = 1.0
+        tab[place] = -1.0
         order[it] = place
     return order
 

@@ -90,12 +90,12 @@ def sum_and_order(tasks_val, machines_val, tasks):
     place = 0
     it = 0
     while it != tasks_val:
-        max_time = 1
+        max_time = -1.0
         for i in range(tasks_val):
             if max_time < tab[i]:
                 max_time = tab[i]
                 place = i
-        tab[place] = 1
+        tab[place] = -1.0
         tab1[it] = place
         it += 1
     return tab1
@@ -144,7 +144,7 @@ def gls(tasks_val, tasks, machines_val, time_max, iter_max, heuristic,
         pi, cmax = neh(tasks, machines_val, tasks_val)
         n = len(pi)
 
-        pi_best = pi
+        pi_best = pi[:]
         cmax_best = cmax
         n_itr = 0
         time_start = time.time()
@@ -155,11 +155,12 @@ def gls(tasks_val, tasks, machines_val, time_max, iter_max, heuristic,
             cmax = makespan(pi, tasks, machines_val)
 
             if cmax < cmax_best:
-                pi_best = pi
+                pi_best = pi[:]
                 cmax_best = cmax
 
-            tasks_perturb, jobs = heuristic(pi, tasks.copy(), machines_val, n)
+            tasks_perturb, jobs = heuristic(pi[:], tasks.copy(), machines_val, n)
             jobs = list(jobs)
+            jobs = [j for j in jobs if 0 <= j < n]
 
             if len(jobs) <= 1:
                 return 1E10
@@ -172,7 +173,7 @@ def gls(tasks_val, tasks, machines_val, time_max, iter_max, heuristic,
 
             n_itr += 1
             if n_itr % 50 == 0:
-                pi = pi_best
+                pi = pi_best[:]
                 cmax = cmax_best
 
     except Exception:
