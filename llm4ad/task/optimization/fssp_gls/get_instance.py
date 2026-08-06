@@ -1,30 +1,63 @@
+import os
+import pathlib
 import numpy as np
 import numpy.typing as npt
 
 
 class GetData():
-    """Generate synthetic Flow-Shop Scheduling instances (EoH paper training set).
+    """Provides Flow-Shop Scheduling instances.
 
-    Per the EoH paper's FSSP-GLS training setup: ``n_instance`` random instances,
-    each with a fixed number of jobs (``n_jobs`` = 50) and a per-instance number
-    of machines drawn uniformly from ``[m_low, m_high]`` = [2, 20]; processing
-    times are drawn i.i.d. from Uniform[0, 1]. Mirrors the generation style of
-    ``tsp_gls_2O.get_instance`` (fixed seed 2024 for reproducibility)."""
+    Supports two modes:
+    1. use_taillard=False (Synthetic): 
+       Generates instances with processing times drawn from Uniform[0, 1].
+    2. use_taillard=True (Original EoH):
+       Loads the 64 text files from `packages/EoH/examples/fssp_gls/TrainingData`.
+       These instances have integer processing times typically ~50, resulting
+       in much larger makespans (e.g. ~1000s).
+    """
 
-    def __init__(self, n_instance, n_jobs=50, m_low=2, m_high=20):
+    def __init__(self, n_instance, n_jobs=50, m_low=2, m_high=20, use_taillard=False):
         self.n_instance = n_instance
         self.n_jobs = n_jobs
         self.m_low = m_low
         self.m_high = m_high
+        self.use_taillard = use_taillard
+        
+        # Point to the original EoH training data directory
+        root = pathlib.Path(__file__).resolve().parent.parent.parent.parent.parent.parent.parent
+        self.data_dir = root / 'packages' / 'EoH' / 'examples' / 'fssp_gls' / 'TrainingData'
+
+    def _read_file(self, filename):
+        with open(filename, "r") as file:
+            tasks_val, machines_val = file.readline().split()
+            tasks_val = int(tasks_val)
+            machines_val = int(machines_val)
+
+            tasks = np.zeros((tasks_val, machines_val))
+            for i in range(tasks_val):
+                tmp = file.readline().split()
+                for j in range(machines_val):
+                    tasks[i][j] = int(float(tmp[j * 2 + 1]))
+        return tasks_val, machines_val, tasks
 
     def generate_instances(self):
-        np.random.seed(2024)
+        """Returns a list of FSSPInstance objects for the evaluator."""
         instance_data = []
-        for _ in range(self.n_instance):
-            # machines vary 2..20 (inclusive) per instance
-            n_machines = int(np.random.randint(self.m_low, self.m_high + 1))
-            processing_times = np.random.random((self.n_jobs, n_machines))  # U[0,1]
-            instance_data.append(FSSPInstance(processing_times))
+
+        if self.use_taillard:
+            # Load original EoH Taillard files (integer processing times)
+            for i in range(1, self.n_instance + 1):
+                filename = self.data_dir / f"{i}.txt"
+                tasks_val, machines_val, tasks = self._read_file(filename)
+                instance_data.append(FSSPInstance(tasks))
+        else:
+            # Generate synthetic U[0, 1] instances
+            np.random.seed(2024)
+            for _ in range(self.n_instance):
+                n_machines = int(np.random.randint(self.m_low, self.m_high + 1))
+                processing_times = np.random.random((self.n_jobs, n_machines))
+                instance_data.append(FSSPInstance(processing_times))
+                
         return instance_data
 
 
