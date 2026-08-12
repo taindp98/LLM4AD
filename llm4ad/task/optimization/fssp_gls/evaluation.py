@@ -34,6 +34,8 @@ def solve_without_time(inst: FSSPInstance, eva, seed=None) -> float:
         cost = gls(inst.tasks_val, inst.tasks, inst.machines_val,
                    time_max, iter_max, eva, seed=seed)
         cost = float(cost)
+        if cost >= 1e9:
+            return float("inf")
         return cost if math.isfinite(cost) else float("inf")
     except Exception:
         return float("inf")

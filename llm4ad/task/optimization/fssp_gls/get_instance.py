@@ -8,20 +8,20 @@ class GetData():
     """Provides Flow-Shop Scheduling instances.
 
     Supports two modes:
-    1. use_taillard=False (Synthetic): 
+    1. use_pregenerated=False (Synthetic):
        Generates instances with processing times drawn from Uniform[0, 1].
-    2. use_taillard=True (Original EoH):
+    2. use_pregenerated=True (Original EoH benchmark):
        Loads the 64 text files from `packages/EoH/examples/fssp_gls/TrainingData`.
        These instances have integer processing times typically ~50, resulting
        in much larger makespans (e.g. ~1000s).
     """
 
-    def __init__(self, n_instance, n_jobs=50, m_low=2, m_high=20, use_taillard=False):
+    def __init__(self, n_instance, n_jobs=50, m_low=2, m_high=20, use_pregenerated=False):
         self.n_instance = n_instance
         self.n_jobs = n_jobs
         self.m_low = m_low
         self.m_high = m_high
-        self.use_taillard = use_taillard
+        self.use_pregenerated = use_pregenerated
         
         # Point to the original EoH training data directory
         root = pathlib.Path(__file__).resolve().parent.parent.parent.parent.parent.parent.parent
@@ -44,8 +44,8 @@ class GetData():
         """Returns a list of FSSPInstance objects for the evaluator."""
         instance_data = []
 
-        if self.use_taillard:
-            # Load original EoH Taillard files (integer processing times)
+        if self.use_pregenerated:
+            # Load original EoH pre-generated benchmark files (integer processing times)
             for i in range(1, self.n_instance + 1):
                 filename = self.data_dir / f"{i}.txt"
                 tasks_val, machines_val, tasks = self._read_file(filename)

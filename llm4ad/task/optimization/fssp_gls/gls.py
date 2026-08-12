@@ -1,245 +1,238 @@
-"""Flow-Shop Scheduling — Guided Local Search engine (numba-optimized).
+"""Flow-Shop Scheduling — Guided Local Search engine.
 
-Numba (`@nb.njit`) reimplementation of ``gls_python.py`` (the faithful pure-Python
-port of EoH's ``fssp_gls/prob.py``), mirroring how ``tsp_gls_2O/gls.py`` JITs its
-local search. The per-iteration ``local_search`` is O(n^3 * m); in pure Python one
-sweep costs ~11 s at n=100/m=20, so only ~2-5 GLS iterations fit in the EoH 60 s
-budget (vs. the paper's ~1000) and large instances barely improve over NEH. JITing
-makespan + the swap/insert local searches gives ~100-300x speedup so the full 1000
-iterations complete in 60 s at all sizes — matching the EoH Table 3 setting.
+PORTED VERBATIM from EoH's ``packages/EoH/examples/fssp_gls_numba/prob.py`` so
+this engine is the original EoH-0.1 implementation, not a reimplementation. The
+numba-jitted kernels (``makespan``, ``local_search``, ``local_search_perturb``)
+operate on reflected lists of ints and a float64 n*m matrix, exactly as EoH does;
+``sum_and_order`` / ``neh`` and the outer GLS loop stay in Python (the latter has
+to call back into the LLM-generated heuristic).
 
-Same public API as before: ``gls(tasks_val, tasks, machines_val, time_max,
-iter_max, heuristic, seed=None) -> best makespan`` and ``makespan(...)``. The outer
-GLS loop stays Python (it calls the LLM-generated ``get_matrix_and_jobs``, which
-cannot be JIT'd); only the hot inner kernels are compiled. Behaviour is identical
-to ``gls_python.py`` (same moves, same accept rule, same 50-iteration restart);
-``gls_python.py`` is kept for reference / cross-checking.
+Public API kept for this repo's callers:
+  * ``gls(tasks_val, tasks, machines_val, time_max, iter_max, heuristic, seed=None)``
+    -> best makespan, or ``INVALID`` (1e10) if the heuristic is unusable.
+  * ``makespan(order, tasks, machines_val)``
+  * ``_makespan`` / ``_local_search`` / ``_neh`` — thin back-compat aliases (see
+    the bottom of this file) used by ``src/analyses/test_{ls,neh}_fssp_taillard.py``.
+
+KNOWN DIVERGENCE FROM THE PREVIOUS VERSION (deliberate, requested): EoH's
+``sum_and_order`` uses ``1`` as its "already placed" sentinel instead of ``-1``.
+On instances whose per-job total processing time can be <= 1 — i.e. the synthetic
+Uniform[0,1] training instances from ``get_instance.GetData(use_pregenerated=
+False)``, especially at small m — such a job is never selected, the NEH order
+comes out with duplicates, and ``local_search``'s ``temp_seq.remove(i)`` raises,
+so ``gls`` returns ``INVALID``. Integer-time instances (the EoH TrainingData
+files and the Taillard test sets) are unaffected. Use
+``GetData(..., use_pregenerated=True)`` for training if this bites.
+
+``gls_python.py`` is kept alongside for reference / cross-checking.
 """
 
 import time
 import random
+import warnings
 from typing import Optional
 
 import numpy as np
-import numba as nb
 
-_CACHE = True
+try:
+    from numba import jit
+    try:                                  # reflected lists warn on every call
+        from numba.core.errors import (NumbaDeprecationWarning,
+                                       NumbaPendingDeprecationWarning)
+        warnings.simplefilter('ignore', category=NumbaDeprecationWarning)
+        warnings.simplefilter('ignore', category=NumbaPendingDeprecationWarning)
+    except ImportError:
+        pass
+except ImportError:                       # numba optional: fall back to pure Python
+    def jit(*args, **kwargs):
+        return lambda f: f
 
 
-@nb.njit(nb.float64(nb.int64[:], nb.float64[:, :], nb.int64), nogil=True, cache=_CACHE)
-def _makespan(order, tasks, m):
-    """Permutation-flowshop makespan of ``order`` (job indices) on ``m`` machines."""
-    times = np.zeros(m)
-    n = order.shape[0]
-    for idx in range(n):
-        j = order[idx]
-        times[0] += tasks[j, 0]
-        for k in range(1, m):
+@jit(nopython=True, cache=True)
+def makespan(order, tasks, machines_val):
+    times = [0.0] * machines_val
+    for j in order:
+        times[0] += tasks[j][0]
+        for k in range(1, machines_val):
             if times[k] < times[k - 1]:
                 times[k] = times[k - 1]
-            times[k] += tasks[j, k]
-    # times is non-decreasing, so the makespan is times[m-1]; keep a max for safety.
-    best = times[0]
-    for k in range(1, m):
-        if times[k] > best:
-            best = times[k]
-    return best
+            times[k] += tasks[j][k]
+    return max(times)
 
 
-@nb.njit(nb.int64[:](nb.int64[:], nb.int64, nb.int64), nogil=True, cache=_CACHE)
-def _relocate(arr, frm, to):
-    """Return a copy of ``arr`` with the element at position ``frm`` removed and
-    re-inserted at position ``to`` in the resulting (n-1)-length sequence — the
-    array equivalent of ``lst.remove(val); lst.insert(to, val)``."""
-    n = arr.shape[0]
-    val = arr[frm]
-    tmp = np.empty(n - 1, dtype=np.int64)
-    k = 0
-    for idx in range(n):
-        if idx != frm:
-            tmp[k] = arr[idx]
-            k += 1
-    out = np.empty(n, dtype=np.int64)
-    for idx in range(to):
-        out[idx] = tmp[idx]
-    out[to] = val
-    for idx in range(to, n - 1):
-        out[idx + 1] = tmp[idx]
-    return out
+@jit(nopython=True, cache=True)
+def local_search(sequence, cmax_old, tasks, machines_val):
+    # One sweep of swap + insert moves (best-accept within the sweep).
+    new_seq = sequence[:]
+    for i in range(len(new_seq)):
+        for j in range(i + 1, len(new_seq)):
+            temp_seq = new_seq[:]
+            temp_seq[i], temp_seq[j] = temp_seq[j], temp_seq[i]
+            cmax = makespan(temp_seq, tasks, machines_val)
+            if cmax < cmax_old:
+                new_seq = temp_seq[:]
+                cmax_old = cmax
+
+    for i in range(1, len(new_seq)):
+        for j in range(1, len(new_seq)):
+            temp_seq = new_seq[:]
+            temp_seq.remove(i)
+            temp_seq.insert(j, i)
+            cmax = makespan(temp_seq, tasks, machines_val)
+            if cmax < cmax_old:
+                new_seq = temp_seq[:]
+                cmax_old = cmax
+
+    return new_seq
 
 
-@nb.njit(nb.int64[:](nb.float64[:, :], nb.int64, nb.int64), nogil=True, cache=_CACHE)
-def _sum_and_order(tasks, n, m):
+@jit(nopython=True, cache=True)
+def local_search_perturb(sequence, cmax_old, tasks, machines_val, job):
+    # Targeted swap + insert moves restricted to the perturbed jobs.
+    new_seq = sequence[:]
+    for i in job:
+        for j in range(i + 1, len(new_seq)):
+            temp_seq = new_seq[:]
+            temp_seq[i], temp_seq[j] = temp_seq[j], temp_seq[i]
+            cmax = makespan(temp_seq, tasks, machines_val)
+            if cmax < cmax_old:
+                new_seq = temp_seq[:]
+                cmax_old = cmax
+
+    for i in job:
+        for j in range(1, len(new_seq)):
+            temp_seq = new_seq[:]
+            temp_seq.remove(i)
+            temp_seq.insert(j, i)
+            cmax = makespan(temp_seq, tasks, machines_val)
+            if cmax < cmax_old:
+                new_seq = temp_seq[:]
+                cmax_old = cmax
+
+    return new_seq
+
+
+def sum_and_order(tasks_val, machines_val, tasks):
     """Order jobs by descending total processing time (NEH ordering)."""
-    tab = np.zeros(n)
-    for j in range(n):
-        for k in range(m):
-            tab[j] += tasks[j, k]
-    order = np.empty(n, dtype=np.int64)
-    for it in range(n):
-        max_time = -1.0
-        place = 0
-        for i in range(n):
+    tab = [0] * tasks_val
+    tab1 = [0] * tasks_val
+    for j in range(tasks_val):
+        for k in range(machines_val):
+            tab[j] += tasks[j][k]
+    place = 0
+    it = 0
+    while it != tasks_val:
+        max_time = 1
+        for i in range(tasks_val):
             if max_time < tab[i]:
                 max_time = tab[i]
                 place = i
-        tab[place] = -1.0
-        order[it] = place
-    return order
+        tab[place] = 1
+        tab1[it] = place
+        it += 1
+    return tab1
 
 
-@nb.njit(nb.types.Tuple((nb.int64[:], nb.float64))(nb.float64[:, :], nb.int64, nb.int64),
-         nogil=True, cache=_CACHE)
-def _neh(tasks, n, m):
-    """NEH constructive heuristic; returns (sequence, makespan)."""
-    order = _sum_and_order(tasks, n, m)
-    cur = np.empty(1, dtype=np.int64)
-    cur[0] = order[0]
-    for i in range(1, n):
-        v = order[i]
-        L = cur.shape[0]
-        best_seq = np.empty(L + 1, dtype=np.int64)
-        min_cmax = 1e18
-        for j in range(0, L + 1):
-            tmp = np.empty(L + 1, dtype=np.int64)
-            for idx in range(j):
-                tmp[idx] = cur[idx]
-            tmp[j] = v
-            for idx in range(j, L):
-                tmp[idx + 1] = cur[idx]
-            c = _makespan(tmp, tasks, m)
-            if c < min_cmax:
-                min_cmax = c
-                best_seq = tmp.copy()
-        cur = best_seq
-    return cur, _makespan(cur, tasks, m)
+def neh(tasks, machines_val, tasks_val):
+    """NEH constructive heuristic."""
+    order = sum_and_order(tasks_val, machines_val, tasks)
+    current_seq = [order[0]]
+    for i in range(1, tasks_val):
+        min_cmax = float("inf")
+        best_seq = None
+        for j in range(0, i + 1):
+            tmp = current_seq[:]
+            tmp.insert(j, order[i])
+            cmax_tmp = makespan(tmp, tasks, machines_val)
+            if min_cmax > cmax_tmp:
+                best_seq = tmp
+                min_cmax = cmax_tmp
+        current_seq = best_seq
+    return current_seq, makespan(current_seq, tasks, machines_val)
 
 
-@nb.njit(nb.int64[:](nb.int64[:], nb.float64, nb.float64[:, :], nb.int64),
-         nogil=True, cache=_CACHE)
-def _local_search(seq, cmax_old, tasks, m):
-    """One sweep of swap (all position pairs) + insert (relocate job value v=1..n-1
-    to each position), best-accept, on the ORIGINAL times. Matches gls_python."""
-    cur = seq.copy()
-    n = cur.shape[0]
-    # swap phase: exchange positions i, j (explicit temp — numba tuple-swap of
-    # array elements is not reliably an atomic swap)
-    for i in range(n):
-        for j in range(i + 1, n):
-            tmp_v = cur[i]; cur[i] = cur[j]; cur[j] = tmp_v
-            c = _makespan(cur, tasks, m)
-            if c < cmax_old:
-                cmax_old = c
-            else:
-                tmp_v = cur[i]; cur[i] = cur[j]; cur[j] = tmp_v   # revert
-    # insert phase: relocate job VALUE v to position p (job 0 / position 0 skipped)
-    for v in range(1, n):
-        for p in range(1, n):
-            pos = 0
-            for idx in range(n):
-                if cur[idx] == v:
-                    pos = idx
-                    break
-            cand = _relocate(cur, pos, p)
-            c = _makespan(cand, tasks, m)
-            if c < cmax_old:
-                cur = cand
-                cmax_old = c
-    return cur
-
-
-@nb.njit(nb.int64[:](nb.int64[:], nb.float64, nb.float64[:, :], nb.int64, nb.int64[:]),
-         nogil=True, cache=_CACHE)
-def _local_search_perturb(seq, cmax_old, tasks, m, job):
-    """Targeted swap + insert restricted to the perturb ``job`` list, on the
-    PERTURBED times. Faithful to gls_python: in the swap phase job values are used
-    as POSITIONS; in the insert phase as job VALUES (the original EoH semantics)."""
-    cur = seq.copy()
-    n = cur.shape[0]
-    for a in range(job.shape[0]):
-        i = job[a]
-        for j in range(i + 1, n):
-            tmp_v = cur[i]; cur[i] = cur[j]; cur[j] = tmp_v
-            c = _makespan(cur, tasks, m)
-            if c < cmax_old:
-                cmax_old = c
-            else:
-                tmp_v = cur[i]; cur[i] = cur[j]; cur[j] = tmp_v
-    for a in range(job.shape[0]):
-        v = job[a]
-        for p in range(1, n):
-            pos = 0
-            for idx in range(n):
-                if cur[idx] == v:
-                    pos = idx
-                    break
-            cand = _relocate(cur, pos, p)
-            c = _makespan(cand, tasks, m)
-            if c < cmax_old:
-                cur = cand
-                cmax_old = c
-    return cur
-
-
-def makespan(order, tasks, machines_val):
-    """Public makespan wrapper (accepts any int sequence / float matrix)."""
-    order = np.ascontiguousarray(order, dtype=np.int64)
-    tasks = np.ascontiguousarray(tasks, dtype=np.float64)
-    return float(_makespan(order, tasks, machines_val))
+INVALID = 1E10
 
 
 def gls(tasks_val, tasks, machines_val, time_max, iter_max, heuristic,
         seed: Optional[int] = None):
-    """Guided local search for one flow-shop instance; returns the best makespan.
+    """Guided local search for one flow-shop instance; returns best makespan.
 
-    Drop-in replacement for ``gls_python.gls`` — identical algorithm, numba-JIT'd
-    inner kernels. ``heuristic`` is the LLM-designed ``get_matrix_and_jobs(
-    current_sequence, time_matrix, m, n) -> (new_matrix, perturb_jobs)``; a
-    heuristic returning <= 1 valid job, or any crash, yields the 1e10 penalty.
-    ``seed`` seeds np.random/random so a stochastic heuristic is reproducible.
+    Returns INVALID (1E10) if the heuristic is unusable (raises, or returns
+    fewer than two jobs to perturb), matching EoH-0.1.
+
+    ``seed``: the GLS engine itself uses no RNG, but the LLM-generated
+    ``heuristic`` is plain Python and may call ``np.random`` / ``random``;
+    seeding here makes it reproducible per (instance, seed). ``seed=None``
+    keeps EoH's hardcoded ``random.seed(2024)``.
     """
+    cmax_best = INVALID
     if seed is not None:
         np.random.seed(seed)
         random.seed(seed)
-
-    tasks = np.ascontiguousarray(tasks, dtype=np.float64)
-    machines_val = int(machines_val)
-    cmax_best = 1e10
+    else:
+        random.seed(2024)
     try:
-        pi, cmax = _neh(tasks, int(tasks_val), machines_val)
-        n = pi.shape[0]
-        pi_best = pi.copy()
+        pi, cmax = neh(tasks, machines_val, tasks_val)
+        n = len(pi)
+
+        pi_best = pi
         cmax_best = cmax
         n_itr = 0
         time_start = time.time()
         while time.time() - time_start < time_max and n_itr < iter_max:
-            pi = _local_search(pi, cmax, tasks, machines_val)
-            cmax = _makespan(pi, tasks, machines_val)
+            piprim = local_search(pi, cmax, tasks, machines_val)
+
+            pi = piprim
+            cmax = makespan(pi, tasks, machines_val)
+
             if cmax < cmax_best:
-                pi_best = pi.copy()
+                pi_best = pi
                 cmax_best = cmax
 
-            # LLM heuristic (pure Python): pass the sequence as a list (as in EoH).
-            tasks_perturb, jobs = heuristic(list(pi), tasks.copy(), machines_val, n)
-            jobs = np.asarray(list(jobs), dtype=np.int64)
-            # keep only valid job indices (guards numba against a malformed heuristic)
-            jobs = jobs[(jobs >= 0) & (jobs < n)]
+            tasks_perturb, jobs = heuristic(pi, tasks.copy(), machines_val, n)
+            # int() keeps the jitted local search typeable whether the heuristic
+            # returns a Python list or a numpy array of indices.
+            jobs = [int(j) for j in jobs]
 
-            if jobs.shape[0] <= 1:
-                return 1E10
-            if jobs.shape[0] > 5:
+            if len(jobs) <= 1:
+                return INVALID
+            if len(jobs) > 5:
                 jobs = jobs[:5]
 
-            tasks_perturb = np.ascontiguousarray(tasks_perturb, dtype=np.float64)
-            cmax = _makespan(pi, tasks_perturb, machines_val)
-            pi = _local_search_perturb(pi, cmax, tasks_perturb, machines_val, jobs)
+            # A single (C-contiguous, float64) layout keeps numba from
+            # recompiling the local search for every heuristic output.
+            tasks_perturb = np.ascontiguousarray(tasks_perturb, dtype=float)
+            cmax = makespan(pi, tasks_perturb, machines_val)
+
+            pi = local_search_perturb(pi, cmax, tasks_perturb, machines_val, jobs)
 
             n_itr += 1
             if n_itr % 50 == 0:
-                pi = pi_best.copy()
+                pi = pi_best
                 cmax = cmax_best
 
-    except Exception:
-        cmax_best = 1E10
+    except Exception as e:
+        print(f"Error occurred: {e}")
+        cmax_best = INVALID
 
     return cmax_best
+
+
+# --------------------------------------------------------------------------- #
+# Back-compat aliases for the previous numba-typed private kernels, kept so
+# src/analyses/test_ls_fssp_taillard.py and test_neh_fssp_taillard.py keep
+# working unchanged. Note the (tasks, n, m) argument order of ``_neh``.
+# --------------------------------------------------------------------------- #
+
+def _makespan(order, tasks, m):
+    return float(makespan(list(order), tasks, int(m)))
+
+
+def _local_search(seq, cmax_old, tasks, m):
+    return local_search(list(seq), float(cmax_old), tasks, int(m))
+
+
+def _neh(tasks, n, m):
+    seq, cmax = neh(tasks, int(m), int(n))
+    return seq, float(cmax)
